@@ -58,6 +58,11 @@ app.all('/sumup/*', auth, async (req, res) => {
     if (req.method !== 'GET' && req.body) {
       const body = {...req.body};
       if (body.amount !== undefined) body.amount = parseFloat(parseFloat(body.amount).toFixed(2));
+      // SumUp requires pay_to_email or merchant_code
+      if (path.includes('/checkouts') && !body.pay_to_email && !body.merchant_code) {
+        if (process.env.SUMUP_MERCHANT_EMAIL) body.pay_to_email = process.env.SUMUP_MERCHANT_EMAIL;
+        if (process.env.SUMUP_MERCHANT_CODE) body.merchant_code = process.env.SUMUP_MERCHANT_CODE;
+      }
       opts.body = JSON.stringify(body);
     }
     const r = await fetch(`https://api.sumup.com${path}`, opts);
