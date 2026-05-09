@@ -6,12 +6,6 @@ const { Pool } = require('pg');
 const fetch = require('node-fetch');
 
 const app = express();
-
-app.use((req, res, next) => {
-  console.log("➡️", req.method, req.url);
-  next();
-});
-
 const VERIFY_TOKEN = "fcutz2026secret";
 // ── CORS
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-fcutz-key','Accept'], credentials: false }));
