@@ -218,9 +218,6 @@ app.get('/webhooks/instagram', (req, res) => {
 app.post('/webhooks/instagram', (req, res) => {
   console.log("🔥 WEBHOOK HIT !");
   console.log(JSON.stringify(req.body, null, 2));
-  res.sendStatus(200);
-});
-
 
   // 👉 plus tard ici :
   // - analyse message
