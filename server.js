@@ -226,7 +226,10 @@ app.post('/webhooks/instagram', (req, res) => {
 
   res.sendStatus(200);
 });
-
+app.get('/ping', (req, res) => {
+  console.log("PING RECEIVED");
+  res.send("ok");
+});
 // ── START — utilise le PORT de Railway automatiquement
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
