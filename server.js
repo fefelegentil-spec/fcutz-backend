@@ -1,11 +1,11 @@
-
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const fetch = require('node-fetch');
+
 const app = express();
-const VERIFY_TOKEN = "fcutz2026secret";
+
 // ── CORS
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-fcutz-key','Accept'], credentials: false }));
 app.options('*', cors());
@@ -201,51 +201,44 @@ app.post('/api/sync/customers', auth, async (req, res) => {
     res.json({ ok: true, added });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
-// ── DISPO
+
+
+// ── DISPONIBILITÉS
 app.get('/api/dispo', async (req, res) => {
   try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`);
     const r = await pool.query("SELECT value FROM settings WHERE key='dispo' LIMIT 1");
-    if (r.rows.length) { res.json(JSON.parse(r.rows[0].value)); }
-    else { res.json({days:{lun:{open:false,start:'09:00',end:'19:00'},mar:{open:false,start:'09:00',end:'19:00'},mer:{open:false,start:'09:00',end:'19:00'},jeu:{open:false,start:'09:00',end:'19:00'},ven:{open:false,start:'09:00',end:'19:00'},sam:{open:true,start:'10:00',end:'19:00'},dim:{open:false,start:'09:00',end:'19:00'}},blockedDays:[]}); }
-  } catch(e) { res.json({days:{sam:{open:true,start:'10:00',end:'19:00'}},blockedDays:[]}); }
+    if (r.rows.length) {
+      res.json(JSON.parse(r.rows[0].value));
+    } else {
+      res.json({
+        days:{
+          lun:{open:false,start:'09:00',end:'19:00'},
+          mar:{open:false,start:'09:00',end:'19:00'},
+          mer:{open:false,start:'09:00',end:'19:00'},
+          jeu:{open:false,start:'09:00',end:'19:00'},
+          ven:{open:false,start:'09:00',end:'19:00'},
+          sam:{open:true,start:'10:00',end:'19:00'},
+          dim:{open:false,start:'09:00',end:'19:00'}
+        },
+        blockedDays:[],
+        pause:{start:'12:00',end:'13:00'}
+      });
+    }
+  } catch(e) { res.status(500).json({error:e.message}); }
 });
 
 app.post('/api/dispo', auth, async (req, res) => {
   try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);`);
-    await pool.query(`INSERT INTO settings (key,value) VALUES ('dispo',$1) ON CONFLICT (key) DO UPDATE SET value=$1`, [JSON.stringify(req.body)]);
+    await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`);
+    await pool.query(
+      `INSERT INTO settings (key,value) VALUES ('dispo',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,
+      [JSON.stringify(req.body)]
+    );
     res.json({ok:true});
   } catch(e) { res.status(500).json({error:e.message}); }
 });
 
-app.get('/webhooks/instagram', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('✅ Instagram webhook vérifié');
-    return res.status(200).send(challenge);
-  }
-
-  return res.sendStatus(403);
-});
-
-app.post('/webhooks/instagram', (req, res) => {
-  console.log("🔥 WEBHOOK HIT !");
-  console.log(JSON.stringify(req.body, null, 2));
-
-  // 👉 plus tard ici :
-  // - analyse message
-  // - création RDV
-  // - réponse automatique
-
-  res.sendStatus(200);
-});
-app.get('/ping', (req, res) => {
-  console.log("PING RECEIVED");
-  res.send("ok");
-});
 // ── START — utilise le PORT de Railway automatiquement
 const PORT = process.env.PORT || 3000;
 initDB().then(() => {
