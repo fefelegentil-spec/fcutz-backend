@@ -5,7 +5,7 @@ const { Pool } = require('pg');
 const fetch = require('node-fetch');
 
 const app = express();
-
+const VERIFY_TOKEN = "fcutz2026secret";
 // ── CORS
 app.use(cors({ origin: '*', methods: ['GET','POST','PUT','DELETE','PATCH','OPTIONS'], allowedHeaders: ['Content-Type','Authorization','x-fcutz-key','Accept'], credentials: false }));
 app.options('*', cors());
@@ -200,6 +200,31 @@ app.post('/api/sync/customers', auth, async (req, res) => {
     }
     res.json({ ok: true, added });
   } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/webhooks/instagram', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('✅ Instagram webhook vérifié');
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
+});
+
+app.post('/webhooks/instagram', (req, res) => {
+  console.log('📩 Instagram DM reçu :');
+  console.log(JSON.stringify(req.body, null, 2));
+
+  // 👉 plus tard ici :
+  // - analyse message
+  // - création RDV
+  // - réponse automatique
+
+  res.sendStatus(200);
 });
 
 // ── START — utilise le PORT de Railway automatiquement
