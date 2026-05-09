@@ -1,7 +1,3 @@
-app.use((req, res, next) => {
-  console.log("➡️", req.method, req.url);
-  next();
-});
 
 require('dotenv').config();
 const express = require('express');
