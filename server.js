@@ -3,6 +3,12 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const fetch = require('node-fetch');
+const webpush = require('web-push');
+
+// ── WEB PUSH (VAPID)
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC  || 'BBi7Rj4vKyX1xuvYkG8940z02hL5T-FtSFSzvtS_mFNsnNopRSI3wmIjDdVKUCghYE0Stuxh71k6Kzj1jNTuHBY';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || 'uv5dwA25pm2zeq0fC-NGbjWTBx_XjeQ7HmaoCm5lick';
+webpush.setVapidDetails('mailto:contact@fcutz.fr', VAPID_PUBLIC, VAPID_PRIVATE);
 
 const app = express();
 
@@ -37,6 +43,14 @@ async function initDB() {
       id SERIAL PRIMARY KEY, type TEXT, icon TEXT, text TEXT, time TEXT,
       created_at TIMESTAMP DEFAULT NOW()
     );
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY,
+      endpoint TEXT UNIQUE NOT NULL,
+      p256dh TEXT NOT NULL,
+      auth TEXT NOT NULL,
+      device TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
   console.log('✅ DB initialized');
 }
@@ -49,6 +63,10 @@ function auth(req, res, next) {
 
 // ── HEALTH
 app.get('/', (req, res) => res.json({ status: '✅ FCUTZ Backend running', version: '1.0.0', timestamp: new Date().toISOString() }));
+app.get('/api/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
+
+// ── VAPID PUBLIC KEY (pour le dashboard)
+app.get('/api/vapid-public', (req, res) => res.json({ publicKey: VAPID_PUBLIC }));
 
 // ── SUMUP PROXY
 app.all('/sumup/*', auth, async (req, res) => {
@@ -92,6 +110,51 @@ app.post('/webhook/sumup', async (req, res) => {
   }
 });
 
+
+// ── PUSH SUBSCRIPTIONS
+app.post('/api/push-subscribe', async (req, res) => {
+  const { subscription, device } = req.body;
+  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Missing subscription' });
+  try {
+    await pool.query(
+      `INSERT INTO push_subscriptions (endpoint, p256dh, auth, device)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (endpoint) DO UPDATE SET p256dh=$2, auth=$3, device=$4`,
+      [subscription.endpoint, subscription.keys.p256dh, subscription.keys.auth, device || '']
+    );
+    console.log('✅ Push subscription saved');
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── Helper : envoyer un push à tous les abonnés
+async function sendPushToAll(payload) {
+  let rows;
+  try {
+    const r = await pool.query('SELECT * FROM push_subscriptions');
+    rows = r.rows;
+  } catch(e) { return; }
+
+  const payloadStr = JSON.stringify(payload);
+  for (const row of rows) {
+    const sub = {
+      endpoint: row.endpoint,
+      keys: { p256dh: row.p256dh, auth: row.auth }
+    };
+    try {
+      await webpush.sendNotification(sub, payloadStr);
+    } catch(e) {
+      // Subscription expirée → la supprimer
+      if (e.statusCode === 410 || e.statusCode === 404) {
+        await pool.query('DELETE FROM push_subscriptions WHERE endpoint=$1', [row.endpoint]).catch(()=>{});
+        console.log('🗑  Push sub expired, removed');
+      } else {
+        console.warn('Push error:', e.message);
+      }
+    }
+  }
+}
+
 // ── CLIENTS
 app.get('/api/clients', auth, async (req, res) => {
   const r = await pool.query('SELECT * FROM clients ORDER BY lname, fname');
@@ -122,9 +185,46 @@ app.get('/api/appointments', auth, async (req, res) => {
   res.json(r.rows.map(a => ({ id:a.id, clientId:a.client_id, service:a.service, price:parseFloat(a.price), duration:a.duration, date:a.date, time:a.time, status:a.status })));
 });
 app.post('/api/appointments', auth, async (req, res) => {
-  const { id, clientId, service, price, duration, date, time, status } = req.body;
+  const { id, clientId, service, price, duration, date, time, status, fname, lname } = req.body;
+
+  // Check if this is a NEW appointment (not an update)
+  const existing = await pool.query('SELECT id FROM appointments WHERE id=$1', [id]);
+  const isNew = existing.rows.length === 0;
+
   await pool.query(`INSERT INTO appointments (id,client_id,service,price,duration,date,time,status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET status=$8`,
     [id, clientId||null, service, price, duration, date, time, status||'pending']);
+
+  // ── PUSH NOTIFICATION si nouveau RDV (from booking.html)
+  if (isNew && status === 'pending') {
+    // Récupérer le nom du client
+    let clientName = fname ? `${fname} ${lname||''}`.trim() : 'Client';
+    if (clientId) {
+      try {
+        const c = await pool.query('SELECT fname, lname FROM clients WHERE id=$1', [clientId]);
+        if (c.rows.length > 0) clientName = `${c.rows[0].fname} ${c.rows[0].lname||''}`.trim();
+      } catch(e) {}
+    }
+
+    const dateF = (date||'').split('-').reverse().join('/');
+    const pushPayload = {
+      title: `✂️ Nouveau RDV — ${clientName}`,
+      body: `${service} · ${price}€ · ${duration||30}min\n${dateF} à ${time}`,
+      apptId: id,
+      url: '/?agenda=1'
+    };
+
+    // Push en arrière-plan (ne pas bloquer la réponse)
+    sendPushToAll(pushPayload).catch(e => console.warn('Push failed:', e.message));
+
+    // Aussi sauver dans notifications DB
+    await pool.query(
+      `INSERT INTO notifications (type,icon,text,time) VALUES ('g','ti-calendar-plus',$1,'À l''instant')`,
+      [`Nouveau RDV — ${clientName} · ${service} · ${dateF} à ${time}`]
+    ).catch(()=>{});
+
+    console.log(`📲 Push envoyé → ${clientName} — ${service}`);
+  }
+
   res.json({ ok: true });
 });
 app.post('/api/appointments/bulk', auth, async (req, res) => {
@@ -200,43 +300,6 @@ app.post('/api/sync/customers', auth, async (req, res) => {
     }
     res.json({ ok: true, added });
   } catch(e) { res.status(500).json({ error: e.message }); }
-});
-
-
-// ── DISPONIBILITÉS
-app.get('/api/dispo', async (req, res) => {
-  try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`);
-    const r = await pool.query("SELECT value FROM settings WHERE key='dispo' LIMIT 1");
-    if (r.rows.length) {
-      res.json(JSON.parse(r.rows[0].value));
-    } else {
-      res.json({
-        days:{
-          lun:{open:false,start:'09:00',end:'19:00'},
-          mar:{open:false,start:'09:00',end:'19:00'},
-          mer:{open:false,start:'09:00',end:'19:00'},
-          jeu:{open:false,start:'09:00',end:'19:00'},
-          ven:{open:false,start:'09:00',end:'19:00'},
-          sam:{open:true,start:'10:00',end:'19:00'},
-          dim:{open:false,start:'09:00',end:'19:00'}
-        },
-        blockedDays:[],
-        pause:{start:'12:00',end:'13:00'}
-      });
-    }
-  } catch(e) { res.status(500).json({error:e.message}); }
-});
-
-app.post('/api/dispo', auth, async (req, res) => {
-  try {
-    await pool.query(`CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)`);
-    await pool.query(
-      `INSERT INTO settings (key,value) VALUES ('dispo',$1) ON CONFLICT (key) DO UPDATE SET value=$1`,
-      [JSON.stringify(req.body)]
-    );
-    res.json({ok:true});
-  } catch(e) { res.status(500).json({error:e.message}); }
 });
 
 // ── START — utilise le PORT de Railway automatiquement
