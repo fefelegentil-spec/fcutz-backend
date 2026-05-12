@@ -116,6 +116,21 @@ async function initDB(){
       updated_at TIMESTAMP DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS client_push_subs (
+      id TEXT PRIMARY KEY,
+      endpoint TEXT NOT NULL,
+      p256dh TEXT,
+      auth TEXT,
+      notify_24h TIMESTAMPTZ,
+      notify_2h TIMESTAMPTZ,
+      message_24h TEXT,
+      message_2h TEXT,
+      booking_id TEXT,
+      sent_24h BOOLEAN DEFAULT false,
+      sent_2h BOOLEAN DEFAULT false,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date);
     CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
     CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(date);
@@ -201,7 +216,8 @@ function rowToClient(row){
 }
 
 // ─── APPOINTMENTS CRUD ───────────────────────────────────────
-app.get('/api/appointments', auth, async (req, res) => {
+// Public endpoint (no auth required for reading) — used by booking.html to show taken slots
+app.get('/api/appointments', async (req, res) => {
   try{
     const { from, to } = req.query;
     let q = 'SELECT * FROM appointments';
@@ -314,7 +330,8 @@ async function getBlockedDays(){
 
 // GET /api/dispo                       → { days:{...}, blockedDays:[...] }
 // GET /api/dispo?date=YYYY-MM-DD       → { date, slots:[{time, available}, ...] }
-app.get('/api/dispo', auth, async (req, res) => {
+// Public endpoint (no auth required) — used by booking.html client
+app.get('/api/dispo', async (req, res) => {
   try{
     const hours = await getHoursConfig();
     const blockedDays = await getBlockedDays();
@@ -439,7 +456,8 @@ function rowToPay(row){
 // ─── SUMUP PROXY ─────────────────────────────────────────────
 const SUMUP_API = 'https://api.sumup.com';
 
-app.post('/sumup/checkout', auth, async (req, res) => {
+// Public endpoint (no auth required) — used by booking.html for client payment
+app.post('/sumup/checkout', async (req, res) => {
   try{
     const { amount, description, key, merchant, return_url } = req.body;
     const apiKey = key || process.env.SUMUP_KEY || await getSetting('sumup_key');
@@ -565,7 +583,7 @@ app.post('/api/push/subscribe', async (req, res) => {
 async function sendPushToAll(title, body, apptId){
   try{
     const r = await pool.query('SELECT endpoint, p256dh, auth FROM push_subscriptions');
-    const payload = JSON.stringify({ title, body, apptId: apptId || null, icon:'/img/COUPE PREMIUM.png', badge:'/img/COUPE PREMIUM.png' });
+    const payload = JSON.stringify({ title, body, type:'barber', apptId: apptId || null, icon:'/img/COUPE PREMIUM.png', badge:'/img/COUPE PREMIUM.png' });
     for(const sub of r.rows){
       try{
         await webpush.sendNotification({ endpoint: sub.endpoint, keys:{ p256dh: sub.p256dh, auth: sub.auth } }, payload);
@@ -577,6 +595,50 @@ async function sendPushToAll(title, body, apptId){
     }
   }catch(e){ console.warn('push error', e.message); }
 }
+
+// ─── CLIENT PUSH REMINDERS ───────────────────────────────────
+app.post('/api/client-notify/subscribe', async (req, res) => {
+  try{
+    const { endpoint, keys, notify_24h, notify_2h, message_24h, message_2h, booking_id } = req.body;
+    if(!endpoint || !keys?.p256dh || !keys?.auth){
+      return res.status(400).json({ error: 'Invalid subscription' });
+    }
+    const id = 'cs_' + Date.now().toString(36);
+    await pool.query(`
+      INSERT INTO client_push_subs (id, endpoint, p256dh, auth, notify_24h, notify_2h, message_24h, message_2h, booking_id)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+      ON CONFLICT (id) DO NOTHING
+    `, [id, endpoint, keys.p256dh, keys.auth, notify_24h || null, notify_2h || null, message_24h || null, message_2h || null, booking_id || null]);
+    res.json({ ok: true });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+// Scheduler — envoie les rappels client dus (toutes les 60s)
+setInterval(async () => {
+  try{
+    const now = new Date().toISOString();
+    const { rows } = await pool.query(`
+      SELECT * FROM client_push_subs
+      WHERE (sent_24h = false AND notify_24h IS NOT NULL AND notify_24h <= $1)
+         OR (sent_2h  = false AND notify_2h  IS NOT NULL AND notify_2h  <= $1)
+    `, [now]);
+    for(const row of rows){
+      const sub = { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } };
+      if(!row.sent_24h && row.notify_24h && new Date(row.notify_24h) <= new Date(now)){
+        try{
+          await webpush.sendNotification(sub, JSON.stringify({ title:'✂️ Rappel RDV — FCUTZ', body: row.message_24h || 'Ton RDV est demain !', type:'client' }));
+        }catch(_){}
+        await pool.query('UPDATE client_push_subs SET sent_24h=true WHERE id=$1', [row.id]);
+      }
+      if(!row.sent_2h && row.notify_2h && new Date(row.notify_2h) <= new Date(now)){
+        try{
+          await webpush.sendNotification(sub, JSON.stringify({ title:"✂️ C'est bientôt — FCUTZ", body: row.message_2h || 'Ton RDV est dans 2h !', type:'client' }));
+        }catch(_){}
+        await pool.query('UPDATE client_push_subs SET sent_2h=true WHERE id=$1', [row.id]);
+      }
+    }
+  }catch(_){}
+}, 60000);
 
 // ─── SETTINGS ────────────────────────────────────────────────
 async function getSetting(key){
