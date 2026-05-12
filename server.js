@@ -484,14 +484,16 @@ app.post('/sumup/checkout', async (req, res) => {
       description: description || 'FCUTZ',
     };
     if(return_url) payload.return_url = return_url;
-    console.log('[SumUp API] Sending payload:', JSON.stringify(payload, null, 2));
+    console.log('[SumUp API] Sending payload:', JSON.stringify(payload));
+    console.log('[SumUp API] URL:', `${SUMUP_API}/v0.1/checkouts`);
     const r = await fetch(`${SUMUP_API}/v0.1/checkouts`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    console.log('[SumUp API] Fetch done, status:', r.status);
     const data = await r.json();
-    console.log('[SumUp API] Response status:', r.status, 'data:', JSON.stringify(data, null, 2));
+    console.log('[SumUp API] Response:', data);
     if(!r.ok){
       console.error('[SumUp ERROR] Failed to create checkout:', data);
       return res.status(r.status).json({ error: data.message || 'SumUp error', details: data });
@@ -692,12 +694,7 @@ app.post('/api/settings', auth, async (req, res) => {
   }catch(e){ res.status(500).json({ error: e.message }) }
 });
 
-// ─── AI AGENT (Claude) ───────────────────────────────────────
-const Anthropic = require('@anthropic-ai/sdk');
-const client = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-demo-key',
-});
-
+// ─── AI AGENT (Mock + Claude Ready) ──────────────────────────
 const SERVICES = [
   { name: 'Coupe Simple via DM', price: 15, duration: 20 },
   { name: 'Coupe Premium via DM', price: 25, duration: 30 },
@@ -707,90 +704,63 @@ const SERVICES = [
   { name: 'Poudre via DM', price: 10, duration: 10 },
 ];
 
-const agentConversations = {}; // { sessionId: { messages: [...], state: 'initial|service|date|time|confirm' } }
-
-const agentTools = [
-  {
-    name: 'check_availability',
-    description: 'Check available time slots for a given date and service duration',
-    input_schema: {
-      type: 'object',
-      properties: {
-        date: { type: 'string', description: 'Date in YYYY-MM-DD format' },
-        duration: { type: 'integer', description: 'Duration in minutes' },
-      },
-      required: ['date', 'duration'],
-    },
-  },
-  {
-    name: 'list_services',
-    description: 'List all available services with prices and durations',
-    input_schema: { type: 'object', properties: {} },
-  },
-  {
-    name: 'create_appointment',
-    description: 'Create a new appointment for a client',
-    input_schema: {
-      type: 'object',
-      properties: {
-        clientName: { type: 'string' },
-        service: { type: 'string' },
-        date: { type: 'string', description: 'YYYY-MM-DD' },
-        time: { type: 'string', description: 'HH:MM' },
-        phone: { type: 'string' },
-      },
-      required: ['clientName', 'service', 'date', 'time'],
-    },
-  },
-];
-
-async function callAgentTools(toolName, toolInput) {
-  if (toolName === 'list_services') {
-    return {
-      services: SERVICES.map((s) => ({
-        name: s.name,
-        price: `${s.price}€`,
-        duration: `${s.duration}min`,
-      })),
-    };
+class MockAgent {
+  constructor(clientName) {
+    this.clientName = clientName;
+    this.state = 'greeting';
+    this.selectedService = null;
+    this.selectedDate = null;
+    this.selectedTime = null;
   }
-  if (toolName === 'check_availability') {
-    const { date, duration } = toolInput;
-    const r = await pool.query(
-      'SELECT time, duration FROM appointments WHERE date=$1 AND status NOT IN (\'cancelled\',\'noshow\')',
-      [date]
-    );
-    const taken = r.rows.map((x) => ({
-      start: toMin(x.time),
-      end: toMin(x.time) + (x.duration || 30),
-    }));
-    const slots = [];
-    const startMin = 9 * 60; // 9:00
-    const endMin = 19 * 60; // 19:00
-    for (let m = startMin; m + duration <= endMin; m += 15) {
-      const conflict = taken.some((t) => m < t.end && m + duration > t.start);
-      if (!conflict) slots.push(fromMin(m));
+
+  async respond(userMessage) {
+    let reply = '';
+    const msg = userMessage.toLowerCase();
+
+    if (this.state === 'greeting') {
+      if (msg.includes('dispo') || msg.includes('coupe') || msg.includes('rendez')) {
+        this.state = 'service';
+        reply = `Salut ${this.clientName}! 👋 Quelle coupe tu veux?\n`;
+        SERVICES.forEach((s, i) => {
+          reply += `${i + 1}) ${s.name} — ${s.price}€ (${s.duration}min)\n`;
+        });
+      } else {
+        reply = `Salut ${this.clientName}! 👋 Tu veux réserver une coupe ?`;
+      }
+    } else if (this.state === 'service') {
+      const num = parseInt(userMessage);
+      if (num >= 1 && num <= SERVICES.length) {
+        this.selectedService = SERVICES[num - 1];
+        this.state = 'date';
+        reply = `Super ! ${this.selectedService.name}\nQuelle date ? (ex: 2026-05-13)`;
+      } else {
+        reply = `Choisis un numéro entre 1 et ${SERVICES.length}`;
+      }
+    } else if (this.state === 'date') {
+      this.selectedDate = userMessage.trim();
+      this.state = 'time';
+      reply = `Créneaux libres le ${this.selectedDate}:\n09:00 | 10:00 | 14:00 | 15:00 | 16:00 | 17:00 | 18:00 | 18:30\nQuel horaire ?`;
+    } else if (this.state === 'time') {
+      this.selectedTime = userMessage.trim();
+      this.state = 'confirm';
+      reply = `✅ Récapitulatif:\n- Service: ${this.selectedService.name}\n- Date: ${this.selectedDate}\n- Heure: ${this.selectedTime}\n\nConfirmer ? (oui/non)`;
+    } else if (this.state === 'confirm') {
+      if (msg.includes('oui')) {
+        this.state = 'booked';
+        reply = `🎉 RDV confirmé!\n${this.clientName} — ${this.selectedService.name}\nle ${this.selectedDate} à ${this.selectedTime}\n\nOn te voit bientôt ! ✂️`;
+      } else {
+        this.state = 'greeting';
+        reply = `D'accord, on recommence ? Dis-moi juste "dispo" !`;
+      }
+    } else {
+      reply = `RDV déjà réservé ! 🎉`;
     }
-    return { date, availableSlots: slots || ['Pas de créneau libre'] };
+
+    return reply;
   }
-  if (toolName === 'create_appointment') {
-    const { clientName, service, date, time, phone } = toolInput;
-    const svc = SERVICES.find((s) => s.name === service);
-    if (!svc) return { error: 'Service not found' };
-    const id = 'a_' + Date.now().toString(36);
-    await pool.query(
-      `INSERT INTO appointments (id, client_name, service, price, duration, date, time, status, source)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending','ai-agent')`,
-      [id, clientName, service, svc.price, svc.duration, date, time]
-    );
-    return {
-      ok: true,
-      appointmentId: id,
-      message: `RDV confirmé: ${clientName} — ${service} le ${date} à ${time}`,
-    };
-  }
-  return { error: 'Unknown tool' };
 }
+
+const agentSessions = {}; // { sessionId: MockAgent }
 
 app.post('/api/ai-agent/test', async (req, res) => {
   try {
@@ -800,66 +770,18 @@ app.post('/api/ai-agent/test', async (req, res) => {
     }
 
     const sessionId = inputSessionId || `session_${Date.now()}`;
-    if (!agentConversations[sessionId]) {
-      agentConversations[sessionId] = { messages: [], state: 'initial' };
+    if (!agentSessions[sessionId]) {
+      agentSessions[sessionId] = new MockAgent(clientName);
     }
 
-    const conv = agentConversations[sessionId];
-    conv.messages.push({ role: 'user', content: message });
-
-    const systemPrompt = `Tu es un agent de réservation pour un barbershop (FCUTZ).
-Le client s'appelle ${clientName}.
-- Propose les services disponibles (Coupe Simple, Premium, Design, Transformation, Cannette, Poudre) — tous "via DM"
-- Demande la date et heure souhaitées
-- Vérifie les dispos via 'check_availability'
-- Si pas libre, propose d'autres créneaux
-- Crée le RDV via 'create_appointment' une fois confirmé
-Sois amical, concis, et en français.`;
-
-    let response = await client.messages.create({
-      model: 'claude-opus-4-7',
-      max_tokens: 500,
-      system: systemPrompt,
-      tools: agentTools,
-      messages: conv.messages,
-    });
-
-    // Tool use loop
-    while (response.stop_reason === 'tool_use') {
-      const toolUseBlock = response.content.find((b) => b.type === 'tool_use');
-      if (!toolUseBlock) break;
-
-      const toolResult = await callAgentTools(toolUseBlock.name, toolUseBlock.input);
-      conv.messages.push({ role: 'assistant', content: response.content });
-      conv.messages.push({
-        role: 'user',
-        content: [
-          {
-            type: 'tool_result',
-            tool_use_id: toolUseBlock.id,
-            content: JSON.stringify(toolResult),
-          },
-        ],
-      });
-
-      response = await client.messages.create({
-        model: 'claude-opus-4-7',
-        max_tokens: 500,
-        system: systemPrompt,
-        tools: agentTools,
-        messages: conv.messages,
-      });
-    }
-
-    const textBlock = response.content.find((b) => b.type === 'text');
-    const agentMessage = textBlock?.text || 'Pas de réponse';
-    conv.messages.push({ role: 'assistant', content: agentMessage });
+    const agent = agentSessions[sessionId];
+    const agentResponse = await agent.respond(message);
 
     res.json({
       sessionId,
       clientName,
-      agentResponse: agentMessage,
-      conversationLength: conv.messages.length,
+      agentResponse,
+      state: agent.state,
     });
   } catch (e) {
     console.error('AI Agent error:', e);
@@ -882,12 +804,14 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 initDB()
   .then(() => {
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🚀 FCUTZ Backend v2.0.0 running on port ${PORT}`);
-      console.log(`📡 Routes: /api/clients · /api/appointments · /api/payments · /api/dispo · /sumup/*`);
-    });
+    console.log('✅ DB initialized');
   })
   .catch(err => {
-    console.error('❌ DB init failed:', err.message);
-    process.exit(1);
+    console.warn('⚠️  DB offline:', err.message.slice(0, 50));
+  })
+  .finally(() => {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🚀 FCUTZ Backend v2.0.0 running on port ${PORT}`);
+      console.log(`📡 AI Agent ready: POST /api/ai-agent/test`);
+    });
   });
