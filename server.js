@@ -472,8 +472,8 @@ app.post('/sumup/checkout', async (req, res) => {
     const { amount, description, key, merchant, return_url } = req.body;
     console.log('[POST /sumup/checkout] parsed body:', { amount, merchant });
 
-    let apiKey = key || process.env.SUMUP_KEY;
-    let merchantCode = merchant || process.env.SUMUP_MERCHANT;
+    let apiKey = key || process.env.SUMUP_KEY || 'sup_sk_1QpZccHb57ks7Ul0R66fjwRtbVfneGkR2';
+    let merchantCode = merchant || process.env.SUMUP_MERCHANT || 'MK29GQN2';
     console.log('[POST /sumup/checkout] apiKey:', apiKey ? 'SET' : 'NULL', 'merchantCode:', merchantCode || 'NULL');
 
     if(!apiKey || !merchantCode){
