@@ -468,14 +468,19 @@ const SUMUP_API = 'https://api.sumup.com';
 // Public endpoint (no auth required) — used by booking.html for client payment
 app.post('/sumup/checkout', async (req, res) => {
   try{
+    console.log('[POST /sumup/checkout] START');
     const { amount, description, key, merchant, return_url } = req.body;
-    const apiKey = key || process.env.SUMUP_KEY || await getSetting('sumup_key');
-    const merchantCode = merchant || process.env.SUMUP_MERCHANT || await getSetting('sumup_merchant');
-    console.log('[POST /sumup/checkout] amount:', amount, 'description:', description, 'merchant:', merchantCode);
+    console.log('[POST /sumup/checkout] parsed body:', { amount, merchant });
+
+    let apiKey = key || process.env.SUMUP_KEY;
+    let merchantCode = merchant || process.env.SUMUP_MERCHANT;
+    console.log('[POST /sumup/checkout] apiKey:', apiKey ? 'SET' : 'NULL', 'merchantCode:', merchantCode || 'NULL');
+
     if(!apiKey || !merchantCode){
-      console.error('[ERROR] Missing SumUp credentials');
+      console.error('[ERROR] Missing SumUp credentials - key:', !!key, 'env.key:', !!process.env.SUMUP_KEY, 'env.merchant:', !!process.env.SUMUP_MERCHANT);
       return res.status(400).json({ error: 'SumUp key/merchant missing' });
     }
+    console.log('[POST /sumup/checkout] Credentials OK');
     const payload = {
       checkout_reference: 'fcutz_' + Date.now(),
       amount: parseFloat(amount),
