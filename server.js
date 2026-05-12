@@ -46,6 +46,15 @@ function auth(req, res, next){
 
 // ─── DB INIT ─────────────────────────────────────────────────
 async function initDB(){
+  // Add missing columns to existing appointments table
+  try{
+    await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_name TEXT`);
+    await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'dashboard'`);
+    console.log('✅ Migrations applied');
+  }catch(e){
+    console.log('ℹ️  Migrations skipped:', e.message.slice(0,50));
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS clients (
       id TEXT PRIMARY KEY,
@@ -462,8 +471,11 @@ app.post('/sumup/checkout', async (req, res) => {
     const { amount, description, key, merchant, return_url } = req.body;
     const apiKey = key || process.env.SUMUP_KEY || await getSetting('sumup_key');
     const merchantCode = merchant || process.env.SUMUP_MERCHANT || await getSetting('sumup_merchant');
-    console.log('[DEBUG /sumup/checkout] amount:', amount, 'merchant:', merchantCode, 'key_received:', !!key);
-    if(!apiKey || !merchantCode){ return res.status(400).json({ error: 'SumUp key/merchant missing' }); }
+    console.log('[POST /sumup/checkout] amount:', amount, 'description:', description, 'merchant:', merchantCode);
+    if(!apiKey || !merchantCode){
+      console.error('[ERROR] Missing SumUp credentials');
+      return res.status(400).json({ error: 'SumUp key/merchant missing' });
+    }
     const payload = {
       checkout_reference: 'fcutz_' + Date.now(),
       amount: parseFloat(amount),
@@ -472,21 +484,24 @@ app.post('/sumup/checkout', async (req, res) => {
       description: description || 'FCUTZ',
     };
     if(return_url) payload.return_url = return_url;
+    console.log('[SumUp API] Sending payload:', JSON.stringify(payload, null, 2));
     const r = await fetch(`${SUMUP_API}/v0.1/checkouts`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
     const data = await r.json();
-    console.log('[SumUp] status:', r.status, 'response:', JSON.stringify(data, null, 2));
+    console.log('[SumUp API] Response status:', r.status, 'data:', JSON.stringify(data, null, 2));
     if(!r.ok){
-      console.error('[SumUp ERROR]', data);
+      console.error('[SumUp ERROR] Failed to create checkout:', data);
       return res.status(r.status).json({ error: data.message || 'SumUp error', details: data });
     }
+    console.log('[SumUp SUCCESS] checkout_id:', data.id, 'hosted_checkout_url:', data.hosted_checkout_url);
     const checkoutUrl = data.hosted_checkout_url
-      || `https://checkout.sumup.com/pay/${data.id}`
-      || `https://pay.sumup.com/b2c/${data.id}`;
+      || (data.id ? `https://checkout.sumup.com/?checkout_reference=${payload.checkout_reference}` : null)
+      || (data.id ? `https://checkout.sumup.com/pay/${data.id}` : null);
     res.json({
+      ok: true,
       checkout_id: data.id,
       checkout_url: checkoutUrl,
       hosted_checkout_url: data.hosted_checkout_url,
@@ -494,7 +509,10 @@ app.post('/sumup/checkout', async (req, res) => {
       amount: data.amount,
       status: data.status,
     });
-  }catch(e){ res.status(500).json({ error: e.message }) }
+  }catch(e){
+    console.error('[EXCEPTION]', e.message);
+    res.status(500).json({ error: e.message })
+  }
 });
 
 app.get('/sumup/balance', auth, async (req, res) => {
@@ -672,6 +690,181 @@ app.post('/api/settings', auth, async (req, res) => {
     }
     res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+// ─── AI AGENT (Claude) ───────────────────────────────────────
+const Anthropic = require('@anthropic-ai/sdk');
+const client = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY || 'sk-ant-demo-key',
+});
+
+const SERVICES = [
+  { name: 'Coupe Simple via DM', price: 15, duration: 20 },
+  { name: 'Coupe Premium via DM', price: 25, duration: 30 },
+  { name: 'Design via DM', price: 30, duration: 25 },
+  { name: 'Transformation via DM', price: 45, duration: 60 },
+  { name: 'Cannette via DM', price: 5, duration: 5 },
+  { name: 'Poudre via DM', price: 10, duration: 10 },
+];
+
+const agentConversations = {}; // { sessionId: { messages: [...], state: 'initial|service|date|time|confirm' } }
+
+const agentTools = [
+  {
+    name: 'check_availability',
+    description: 'Check available time slots for a given date and service duration',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', description: 'Date in YYYY-MM-DD format' },
+        duration: { type: 'integer', description: 'Duration in minutes' },
+      },
+      required: ['date', 'duration'],
+    },
+  },
+  {
+    name: 'list_services',
+    description: 'List all available services with prices and durations',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'create_appointment',
+    description: 'Create a new appointment for a client',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientName: { type: 'string' },
+        service: { type: 'string' },
+        date: { type: 'string', description: 'YYYY-MM-DD' },
+        time: { type: 'string', description: 'HH:MM' },
+        phone: { type: 'string' },
+      },
+      required: ['clientName', 'service', 'date', 'time'],
+    },
+  },
+];
+
+async function callAgentTools(toolName, toolInput) {
+  if (toolName === 'list_services') {
+    return {
+      services: SERVICES.map((s) => ({
+        name: s.name,
+        price: `${s.price}€`,
+        duration: `${s.duration}min`,
+      })),
+    };
+  }
+  if (toolName === 'check_availability') {
+    const { date, duration } = toolInput;
+    const r = await pool.query(
+      'SELECT time, duration FROM appointments WHERE date=$1 AND status NOT IN (\'cancelled\',\'noshow\')',
+      [date]
+    );
+    const taken = r.rows.map((x) => ({
+      start: toMin(x.time),
+      end: toMin(x.time) + (x.duration || 30),
+    }));
+    const slots = [];
+    const startMin = 9 * 60; // 9:00
+    const endMin = 19 * 60; // 19:00
+    for (let m = startMin; m + duration <= endMin; m += 15) {
+      const conflict = taken.some((t) => m < t.end && m + duration > t.start);
+      if (!conflict) slots.push(fromMin(m));
+    }
+    return { date, availableSlots: slots || ['Pas de créneau libre'] };
+  }
+  if (toolName === 'create_appointment') {
+    const { clientName, service, date, time, phone } = toolInput;
+    const svc = SERVICES.find((s) => s.name === service);
+    if (!svc) return { error: 'Service not found' };
+    const id = 'a_' + Date.now().toString(36);
+    await pool.query(
+      `INSERT INTO appointments (id, client_name, service, price, duration, date, time, status, source)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'pending','ai-agent')`,
+      [id, clientName, service, svc.price, svc.duration, date, time]
+    );
+    return {
+      ok: true,
+      appointmentId: id,
+      message: `RDV confirmé: ${clientName} — ${service} le ${date} à ${time}`,
+    };
+  }
+  return { error: 'Unknown tool' };
+}
+
+app.post('/api/ai-agent/test', async (req, res) => {
+  try {
+    const { clientName, message, sessionId: inputSessionId } = req.body;
+    if (!clientName || !message) {
+      return res.status(400).json({ error: 'clientName and message required' });
+    }
+
+    const sessionId = inputSessionId || `session_${Date.now()}`;
+    if (!agentConversations[sessionId]) {
+      agentConversations[sessionId] = { messages: [], state: 'initial' };
+    }
+
+    const conv = agentConversations[sessionId];
+    conv.messages.push({ role: 'user', content: message });
+
+    const systemPrompt = `Tu es un agent de réservation pour un barbershop (FCUTZ).
+Le client s'appelle ${clientName}.
+- Propose les services disponibles (Coupe Simple, Premium, Design, Transformation, Cannette, Poudre) — tous "via DM"
+- Demande la date et heure souhaitées
+- Vérifie les dispos via 'check_availability'
+- Si pas libre, propose d'autres créneaux
+- Crée le RDV via 'create_appointment' une fois confirmé
+Sois amical, concis, et en français.`;
+
+    let response = await client.messages.create({
+      model: 'claude-opus-4-7',
+      max_tokens: 500,
+      system: systemPrompt,
+      tools: agentTools,
+      messages: conv.messages,
+    });
+
+    // Tool use loop
+    while (response.stop_reason === 'tool_use') {
+      const toolUseBlock = response.content.find((b) => b.type === 'tool_use');
+      if (!toolUseBlock) break;
+
+      const toolResult = await callAgentTools(toolUseBlock.name, toolUseBlock.input);
+      conv.messages.push({ role: 'assistant', content: response.content });
+      conv.messages.push({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: toolUseBlock.id,
+            content: JSON.stringify(toolResult),
+          },
+        ],
+      });
+
+      response = await client.messages.create({
+        model: 'claude-opus-4-7',
+        max_tokens: 500,
+        system: systemPrompt,
+        tools: agentTools,
+        messages: conv.messages,
+      });
+    }
+
+    const textBlock = response.content.find((b) => b.type === 'text');
+    const agentMessage = textBlock?.text || 'Pas de réponse';
+    conv.messages.push({ role: 'assistant', content: agentMessage });
+
+    res.json({
+      sessionId,
+      clientName,
+      agentResponse: agentMessage,
+      conversationLength: conv.messages.length,
+    });
+  } catch (e) {
+    console.error('AI Agent error:', e);
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────
