@@ -459,10 +459,14 @@ app.post('/sumup/checkout', auth, async (req, res) => {
       body: JSON.stringify(payload),
     });
     const data = await r.json();
+    console.log('[SumUp] status:', r.status, 'response:', JSON.stringify(data).slice(0,400));
     if(!r.ok){ return res.status(r.status).json({ error: data.message || 'SumUp error', details: data }); }
+    const checkoutUrl = data.hosted_checkout_url
+      || `https://checkout.sumup.com/pay/${data.id}`
+      || `https://pay.sumup.com/b2c/${data.id}`;
     res.json({
       checkout_id: data.id,
-      checkout_url: data.hosted_checkout_url || `https://pay.sumup.com/b2c/${data.id}`,
+      checkout_url: checkoutUrl,
       hosted_checkout_url: data.hosted_checkout_url,
       checkout_reference: data.checkout_reference,
       amount: data.amount,
