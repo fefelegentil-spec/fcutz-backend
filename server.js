@@ -50,6 +50,7 @@ async function initDB(){
   try{
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_name TEXT`);
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'dashboard'`);
+    await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS note TEXT`);
     console.log('✅ Migrations applied');
   }catch(e){
     console.log('ℹ️  Migrations skipped:', e.message.slice(0,50));
@@ -505,8 +506,7 @@ app.post('/sumup/checkout', async (req, res) => {
     }
     console.log('[SumUp SUCCESS] checkout_id:', data.id);
     const checkoutUrl = data.hosted_checkout_url
-      || (data.checkout_reference ? `https://checkout.sumup.com/?checkout_reference=${data.checkout_reference}` : null)
-      || (data.id ? `https://checkout.sumup.com/pay/${data.id}` : null);
+      || (data.id ? `https://pay.sumup.com/b2c/${data.id}` : null);
     console.log('[SumUp] checkoutUrl:', checkoutUrl);
     res.json({
       ok: true,
