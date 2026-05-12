@@ -462,6 +462,7 @@ app.post('/sumup/checkout', async (req, res) => {
     const { amount, description, key, merchant, return_url } = req.body;
     const apiKey = key || process.env.SUMUP_KEY || await getSetting('sumup_key');
     const merchantCode = merchant || process.env.SUMUP_MERCHANT || await getSetting('sumup_merchant');
+    console.log('[DEBUG /sumup/checkout] amount:', amount, 'merchant:', merchantCode, 'key_received:', !!key);
     if(!apiKey || !merchantCode){ return res.status(400).json({ error: 'SumUp key/merchant missing' }); }
     const payload = {
       checkout_reference: 'fcutz_' + Date.now(),
@@ -477,8 +478,11 @@ app.post('/sumup/checkout', async (req, res) => {
       body: JSON.stringify(payload),
     });
     const data = await r.json();
-    console.log('[SumUp] status:', r.status, 'response:', JSON.stringify(data).slice(0,400));
-    if(!r.ok){ return res.status(r.status).json({ error: data.message || 'SumUp error', details: data }); }
+    console.log('[SumUp] status:', r.status, 'response:', JSON.stringify(data, null, 2));
+    if(!r.ok){
+      console.error('[SumUp ERROR]', data);
+      return res.status(r.status).json({ error: data.message || 'SumUp error', details: data });
+    }
     const checkoutUrl = data.hosted_checkout_url
       || `https://checkout.sumup.com/pay/${data.id}`
       || `https://pay.sumup.com/b2c/${data.id}`;
