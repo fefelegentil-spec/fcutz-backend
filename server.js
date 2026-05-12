@@ -503,10 +503,11 @@ app.post('/sumup/checkout', async (req, res) => {
       console.error('[SumUp ERROR] Failed to create checkout:', data);
       return res.status(r.status).json({ error: data.message || 'SumUp error', details: data });
     }
-    console.log('[SumUp SUCCESS] checkout_id:', data.id, 'hosted_checkout_url:', data.hosted_checkout_url);
+    console.log('[SumUp SUCCESS] checkout_id:', data.id);
     const checkoutUrl = data.hosted_checkout_url
-      || (data.id ? `https://checkout.sumup.com/?checkout_reference=${payload.checkout_reference}` : null)
+      || (data.checkout_reference ? `https://checkout.sumup.com/?checkout_reference=${data.checkout_reference}` : null)
       || (data.id ? `https://checkout.sumup.com/pay/${data.id}` : null);
+    console.log('[SumUp] checkoutUrl:', checkoutUrl);
     res.json({
       ok: true,
       checkout_id: data.id,
@@ -516,6 +517,7 @@ app.post('/sumup/checkout', async (req, res) => {
       amount: data.amount,
       status: data.status,
     });
+    console.log('[SumUp] Response sent:', { checkoutUrl });
   }catch(e){
     console.error('[EXCEPTION]', e.message);
     res.status(500).json({ error: e.message })
