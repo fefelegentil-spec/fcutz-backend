@@ -382,7 +382,7 @@ app.post('/api/book', async (req, res) => {
   try{
     const b = req.body;
     if(!b.date || !b.time || !b.service){ return res.status(400).json({ error: 'Date, time, service required' }); }
-    // Check conflict
+    // Validate slot only (no creation yet)
     const dur = parseInt(b.duration) || 30;
     const r = await pool.query(`SELECT time, duration FROM appointments WHERE date=$1 AND status NOT IN ('cancelled','noshow')`, [b.date]);
     const startMin = toMin(b.time);
@@ -391,6 +391,16 @@ app.post('/api/book', async (req, res) => {
       return startMin < xe && startMin + dur > xs;
     });
     if(conflict) return res.status(409).json({ error: 'Slot taken' });
+    res.json({ ok: true });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+app.post('/api/appointments/create', async (req, res) => {
+  try{
+    const b = req.body;
+    if(!b.date || !b.time || !b.service){ return res.status(400).json({ error: 'Date, time, service required' }); }
+
+    const dur = parseInt(b.duration) || 30;
 
     // Create or link client
     let clientId = null;
@@ -407,20 +417,11 @@ app.post('/api/book', async (req, res) => {
     const id = 'a_' + Date.now().toString(36);
     await pool.query(`
       INSERT INTO appointments (id, client_id, client_name, service, price, duration, date, time, status, note, source)
-      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pending',$9,'booking')
-    `, [id, clientId, `${b.fname||''} ${b.lname||''}`.trim(), b.service, b.price||0, dur, b.date, b.time, b.note||'']);
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+    `, [id, clientId, `${b.fname||''} ${b.lname||''}`.trim(), b.service, b.price||0, dur, b.date, b.time, b.status||'confirmed', b.note||'', b.source||'booking']);
 
     sendPushToAll('Nouveau RDV en ligne', `${b.fname||''} ${b.lname||''} — ${b.service} le ${b.date} à ${b.time}`, id).catch(()=>{});
     res.json({ ok: true, id });
-  }catch(e){ res.status(500).json({ error: e.message }) }
-});
-
-app.post('/api/appointments/:id/confirm', async (req, res) => {
-  try{
-    const { id } = req.params;
-    const { status = 'confirmed', method = 'unknown' } = req.body;
-    await pool.query(`UPDATE appointments SET status=$1, updated_at=NOW() WHERE id=$2`, [status, id]);
-    res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
 });
 
