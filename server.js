@@ -46,11 +46,12 @@ function auth(req, res, next){
 
 // ─── DB INIT ─────────────────────────────────────────────────
 async function initDB(){
-  // Add missing columns to existing appointments table
+  // Add missing columns to existing tables
   try{
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_name TEXT`);
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'dashboard'`);
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS note TEXT`);
+    await pool.query(`ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
     console.log('✅ Migrations applied');
   }catch(e){
     console.log('ℹ️  Migrations skipped:', e.message.slice(0,50));
@@ -141,12 +142,42 @@ async function initDB(){
       created_at TIMESTAMP DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS availability (
+      key TEXT PRIMARY KEY,
+      hours JSONB,
+      closed_dates JSONB DEFAULT '[]',
+      updated_at TIMESTAMP DEFAULT NOW()
+    );
+
     CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date);
     CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
     CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(date);
     CREATE INDEX IF NOT EXISTS idx_payments_client ON payments(client_id);
     CREATE INDEX IF NOT EXISTS idx_clients_sumup ON clients(sumup_id);
   `);
+
+  // Ensure default availability row exists
+  try{
+    const avail = await pool.query('SELECT * FROM availability WHERE key = $1', ['default']);
+    if(!avail.rows.length){
+      const defaultHours = {
+        lun:{open:true,start:'09:00',end:'19:00'},
+        mar:{open:true,start:'09:00',end:'19:00'},
+        mer:{open:true,start:'09:00',end:'19:00'},
+        jeu:{open:true,start:'09:00',end:'19:00'},
+        ven:{open:true,start:'09:00',end:'19:00'},
+        sam:{open:true,start:'10:00',end:'19:00'},
+        dim:{open:false,start:'10:00',end:'18:00'}
+      };
+      await pool.query(
+        'INSERT INTO availability (key, hours, closed_dates) VALUES ($1, $2, $3)',
+        ['default', JSON.stringify(defaultHours), JSON.stringify([])]
+      );
+      console.log('✅ Default availability initialized');
+    }
+  }catch(e){
+    console.log('ℹ️  Availability initialization error:', e.message.slice(0,50));
+  }
   console.log('✅ DB initialized');
 }
 
@@ -800,6 +831,66 @@ app.post('/api/ai-agent/test', async (req, res) => {
   }
 });
 
+// ─── AVAILABILITY ───────────────────────────────────────────
+app.get('/api/availability', async (req, res) => {
+  try{
+    const r = await pool.query('SELECT hours, closed_dates FROM availability WHERE key = $1', ['default']);
+    const result = {
+      hours: r.rows[0]?.hours || {},
+      closedDates: r.rows[0]?.closed_dates || []
+    };
+    console.log('📖 GET /api/availability', { hasData: !!r.rows[0], hoursKeys: Object.keys(result.hours).length, closedDates: result.closedDates?.length || 0 });
+    res.json(result);
+  }catch(e){
+    console.error('❌ Availability fetch error:', e.message);
+    res.status(500).json({ error: e.message })
+  }
+});
+
+app.post('/api/availability', auth, async (req, res) => {
+  try{
+    const { hours, closedDates } = req.body;
+    console.log('📝 POST /api/availability', { hours: !!hours, closedDates: closedDates?.length || 0 });
+    await pool.query(`
+      INSERT INTO availability (key, hours, closed_dates, updated_at)
+      VALUES ($1, $2, $3, NOW())
+      ON CONFLICT (key) DO UPDATE SET
+        hours = EXCLUDED.hours,
+        closed_dates = EXCLUDED.closed_dates,
+        updated_at = NOW()
+    `, ['default', JSON.stringify(hours), JSON.stringify(closedDates)]);
+    console.log('✅ Availability saved');
+    res.json({ ok: true });
+  }catch(e){
+    console.error('❌ Availability save error:', e.message);
+    res.status(500).json({ error: e.message })
+  }
+});
+
+app.post('/api/availability/closed', auth, async (req, res) => {
+  try{
+    const { date, reason } = req.body;
+    const r = await pool.query('SELECT closed_dates FROM availability WHERE key = $1', ['default']);
+    const closedDates = (r.rows[0]?.closed_dates || []).concat([{ date, reason: reason || '' }]);
+    await pool.query(`
+      UPDATE availability SET closed_dates = $1, updated_at = NOW() WHERE key = $2
+    `, [JSON.stringify(closedDates), 'default']);
+    res.json({ ok: true });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+app.post('/api/availability/closed/remove', auth, async (req, res) => {
+  try{
+    const { date } = req.body;
+    const r = await pool.query('SELECT closed_dates FROM availability WHERE key = $1', ['default']);
+    const closedDates = (r.rows[0]?.closed_dates || []).filter(cd => cd.date !== date);
+    await pool.query(`
+      UPDATE availability SET closed_dates = $1, updated_at = NOW() WHERE key = $2
+    `, [JSON.stringify(closedDates), 'default']);
+    res.json({ ok: true });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
 // ─── HELPERS ─────────────────────────────────────────────────
 function toMin(t){ const [h,m] = t.split(':').map(Number); return h*60 + m; }
 function fromMin(min){ const h = Math.floor(min/60), m = min%60; return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0'); }
@@ -826,4 +917,3 @@ initDB()
       console.log(`📡 AI Agent ready: POST /api/ai-agent/test`);
     });
   });
-
