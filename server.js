@@ -813,6 +813,9 @@ app.get('/api/availability', async (req, res) => {
       closedDates: r.rows[0]?.closed_dates || []
     };
     console.log('📖 GET /api/availability', { hasData: !!r.rows[0], hoursKeys: Object.keys(result.hours).length, closedDates: result.closedDates?.length || 0 });
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     res.json(result);
   }catch(e){
     console.error('❌ Availability fetch error:', e.message);
@@ -862,6 +865,14 @@ app.post('/api/availability/closed/remove', auth, async (req, res) => {
     `, [JSON.stringify(closedDates), 'default']);
     res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+// ─── CLEANUP (temp) ──────────────────────────────────────────
+app.get('/api/cleanup-test', async (req, res) => {
+  try {
+    const result = await pool.query("DELETE FROM appointments WHERE date >= '2026-05-13'");
+    res.json({ deleted: result.rowCount });
+  } catch(e) { res.status(500).json({ error: e.message }) }
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────
