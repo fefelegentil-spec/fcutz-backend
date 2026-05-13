@@ -63,104 +63,71 @@ async function initDB(){
     console.log('ℹ️  Migrations skipped:', e.message.slice(0,50));
   }
 
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS clients (
+  const tables = [
+    `CREATE TABLE IF NOT EXISTS clients (
       id TEXT PRIMARY KEY,
-      fname TEXT,
-      lname TEXT,
-      phone TEXT,
-      email TEXT,
+      fname TEXT, lname TEXT, phone TEXT, email TEXT,
       fav TEXT DEFAULT 'Coupe Simple',
-      visits INTEGER DEFAULT 0,
-      spent NUMERIC DEFAULT 0,
-      sumup_id TEXT,
-      last_visit DATE,
+      visits INTEGER DEFAULT 0, spent NUMERIC DEFAULT 0,
+      sumup_id TEXT, last_visit DATE,
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS appointments (
-      id TEXT PRIMARY KEY,
-      client_id TEXT,
-      client_name TEXT,
-      service TEXT,
-      price NUMERIC,
-      duration INTEGER,
-      date TEXT,
-      time TEXT,
-      status TEXT DEFAULT 'pending',
-      note TEXT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS appointments (
+      id TEXT PRIMARY KEY, client_id TEXT, client_name TEXT,
+      service TEXT, price NUMERIC, duration INTEGER,
+      date TEXT, time TEXT,
+      status TEXT DEFAULT 'pending', note TEXT,
       source TEXT DEFAULT 'dashboard',
       created_at TIMESTAMP DEFAULT NOW(),
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS payments (
-      id TEXT PRIMARY KEY,
-      client_id TEXT,
-      client_name TEXT,
-      service TEXT,
-      amount NUMERIC,
-      method TEXT DEFAULT 'sumup',
-      date TEXT,
-      time TEXT,
-      tx_id TEXT,
-      checkout_id TEXT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS payments (
+      id TEXT PRIMARY KEY, client_id TEXT, client_name TEXT,
+      service TEXT, amount NUMERIC,
+      method TEXT DEFAULT 'sumup', date TEXT, time TEXT,
+      tx_id TEXT, checkout_id TEXT,
       created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS notifications (
-      id SERIAL PRIMARY KEY,
-      type TEXT,
-      icon TEXT,
-      text TEXT,
-      time TEXT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS notifications (
+      id SERIAL PRIMARY KEY, type TEXT, icon TEXT,
+      text TEXT, time TEXT,
       created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS push_subscriptions (
-      id SERIAL PRIMARY KEY,
-      endpoint TEXT UNIQUE NOT NULL,
-      p256dh TEXT NOT NULL,
-      auth TEXT NOT NULL,
-      device TEXT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS push_subscriptions (
+      id SERIAL PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL,
+      p256dh TEXT NOT NULL, auth TEXT NOT NULL, device TEXT,
       created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
+    )`,
+    `CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL,
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS client_push_subs (
-      id TEXT PRIMARY KEY,
-      endpoint TEXT NOT NULL,
-      p256dh TEXT,
-      auth TEXT,
-      notify_24h TIMESTAMPTZ,
-      notify_2h TIMESTAMPTZ,
-      message_24h TEXT,
-      message_2h TEXT,
+    )`,
+    `CREATE TABLE IF NOT EXISTS client_push_subs (
+      id TEXT PRIMARY KEY, endpoint TEXT NOT NULL,
+      p256dh TEXT, auth TEXT,
+      notify_24h TIMESTAMPTZ, notify_2h TIMESTAMPTZ,
+      message_24h TEXT, message_2h TEXT,
       booking_id TEXT,
       sent_24h BOOLEAN DEFAULT false,
       sent_2h BOOLEAN DEFAULT false,
       created_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE TABLE IF NOT EXISTS availability (
+    )`,
+    `CREATE TABLE IF NOT EXISTS availability (
       key TEXT PRIMARY KEY,
       hours JSONB DEFAULT '{"lun":{"open":true,"start":"09:00","end":"19:00"},"mar":{"open":true,"start":"09:00","end":"19:00"},"mer":{"open":true,"start":"09:00","end":"19:00"},"jeu":{"open":true,"start":"09:00","end":"19:00"},"ven":{"open":true,"start":"09:00","end":"19:00"},"sam":{"open":true,"start":"10:00","end":"19:00"},"dim":{"open":false,"start":"10:00","end":"18:00"}}'::jsonb,
       closed_dates JSONB DEFAULT '[]'::jsonb,
       updated_at TIMESTAMP DEFAULT NOW()
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date);
-    CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id);
-    CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(date);
-    CREATE INDEX IF NOT EXISTS idx_payments_client ON payments(client_id);
-    CREATE INDEX IF NOT EXISTS idx_clients_sumup ON clients(sumup_id);
-  `);
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_appointments_date ON appointments(date)`,
+    `CREATE INDEX IF NOT EXISTS idx_appointments_client ON appointments(client_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_payments_date ON payments(date)`,
+    `CREATE INDEX IF NOT EXISTS idx_payments_client ON payments(client_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_clients_sumup ON clients(sumup_id)`
+  ];
+  for(const sql of tables){
+    try{ await pool.query(sql); }catch(e){ console.log('ℹ️  Table/index exists:', e.message.slice(0,40)); }
+  }
 
   // Ensure default availability row exists
   try{
