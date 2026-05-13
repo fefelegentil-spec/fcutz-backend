@@ -46,12 +46,18 @@ function auth(req, res, next){
 
 // ─── DB INIT ─────────────────────────────────────────────────
 async function initDB(){
-  // Add missing columns to existing tables
+  // Add missing columns to existing tables + fix NULL values
   try{
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS client_name TEXT`);
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'dashboard'`);
     await pool.query(`ALTER TABLE appointments ADD COLUMN IF NOT EXISTS note TEXT`);
     await pool.query(`ALTER TABLE settings ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+    // Fix NULL hours in availability table
+    const defaultHours = {"lun":{"open":true,"start":"09:00","end":"19:00"},"mar":{"open":true,"start":"09:00","end":"19:00"},"mer":{"open":true,"start":"09:00","end":"19:00"},"jeu":{"open":true,"start":"09:00","end":"19:00"},"ven":{"open":true,"start":"09:00","end":"19:00"},"sam":{"open":true,"start":"10:00","end":"19:00"},"dim":{"open":false,"start":"10:00","end":"18:00"}};
+    await pool.query(
+      `UPDATE availability SET hours = $1 WHERE hours IS NULL OR hours = '{}'::jsonb`,
+      [JSON.stringify(defaultHours)]
+    );
     console.log('✅ Migrations applied');
   }catch(e){
     console.log('ℹ️  Migrations skipped:', e.message.slice(0,50));
@@ -144,8 +150,8 @@ async function initDB(){
 
     CREATE TABLE IF NOT EXISTS availability (
       key TEXT PRIMARY KEY,
-      hours JSONB,
-      closed_dates JSONB DEFAULT '[]',
+      hours JSONB DEFAULT '{"lun":{"open":true,"start":"09:00","end":"19:00"},"mar":{"open":true,"start":"09:00","end":"19:00"},"mer":{"open":true,"start":"09:00","end":"19:00"},"jeu":{"open":true,"start":"09:00","end":"19:00"},"ven":{"open":true,"start":"09:00","end":"19:00"},"sam":{"open":true,"start":"10:00","end":"19:00"},"dim":{"open":false,"start":"10:00","end":"18:00"}}'::jsonb,
+      closed_dates JSONB DEFAULT '[]'::jsonb,
       updated_at TIMESTAMP DEFAULT NOW()
     );
 
