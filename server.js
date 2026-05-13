@@ -384,11 +384,15 @@ app.post('/api/book', async (req, res) => {
     if(!b.date || !b.time || !b.service){ return res.status(400).json({ error: 'Date, time, service required' }); }
     // Check conflict
     const dur = parseInt(b.duration) || 30;
-    const r = await pool.query(`SELECT time, duration FROM appointments WHERE date=$1 AND status NOT IN ('cancelled','noshow')`, [b.date]);
+    const r = await pool.query(`SELECT id, time, duration FROM appointments WHERE date=$1 AND status NOT IN ('cancelled','noshow')`, [b.date]);
     const startMin = toMin(b.time);
+    console.log('📌 /api/book:', { date: b.date, time: b.time, dur, existingCount: r.rows.length });
+    if(r.rows.length) console.log('   existing:', r.rows.map(x => `${x.time}(${toMin(x.time)}-${toMin(x.time)+(x.duration||30)})`));
     const conflict = r.rows.some(x => {
       const xs = toMin(x.time), xe = xs + (x.duration || 30);
-      return startMin < xe && startMin + dur > xs;
+      const overlaps = startMin < xe && startMin + dur > xs;
+      if(overlaps) console.log(`   ❌ CONFLICT: ${b.time}(${startMin}-${startMin+dur}) overlaps ${x.time}(${xs}-${xe})`);
+      return overlaps;
     });
     if(conflict) return res.status(409).json({ error: 'Slot taken' });
 
