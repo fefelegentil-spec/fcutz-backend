@@ -384,15 +384,11 @@ app.post('/api/book', async (req, res) => {
     if(!b.date || !b.time || !b.service){ return res.status(400).json({ error: 'Date, time, service required' }); }
     // Check conflict
     const dur = parseInt(b.duration) || 30;
-    const r = await pool.query(`SELECT id, time, duration FROM appointments WHERE date=$1 AND status NOT IN ('cancelled','noshow')`, [b.date]);
+    const r = await pool.query(`SELECT time, duration FROM appointments WHERE date=$1 AND status NOT IN ('cancelled','noshow')`, [b.date]);
     const startMin = toMin(b.time);
-    console.log('📌 /api/book:', { date: b.date, time: b.time, dur, existingCount: r.rows.length });
-    if(r.rows.length) console.log('   existing:', r.rows.map(x => `${x.time}(${toMin(x.time)}-${toMin(x.time)+(x.duration||30)})`));
     const conflict = r.rows.some(x => {
       const xs = toMin(x.time), xe = xs + (x.duration || 30);
-      const overlaps = startMin < xe && startMin + dur > xs;
-      if(overlaps) console.log(`   ❌ CONFLICT: ${b.time}(${startMin}-${startMin+dur}) overlaps ${x.time}(${xs}-${xe})`);
-      return overlaps;
+      return startMin < xe && startMin + dur > xs;
     });
     if(conflict) return res.status(409).json({ error: 'Slot taken' });
 
@@ -416,6 +412,15 @@ app.post('/api/book', async (req, res) => {
 
     sendPushToAll('Nouveau RDV en ligne', `${b.fname||''} ${b.lname||''} — ${b.service} le ${b.date} à ${b.time}`, id).catch(()=>{});
     res.json({ ok: true, id });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+app.post('/api/appointments/:id/confirm', async (req, res) => {
+  try{
+    const { id } = req.params;
+    const { status = 'confirmed', method = 'unknown' } = req.body;
+    await pool.query(`UPDATE appointments SET status=$1, updated_at=NOW() WHERE id=$2`, [status, id]);
+    res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
 });
 
@@ -869,14 +874,6 @@ app.post('/api/availability/closed/remove', auth, async (req, res) => {
     `, [JSON.stringify(closedDates), 'default']);
     res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
-});
-
-// ─── CLEANUP (temp) ──────────────────────────────────────────
-app.get('/api/cleanup-test', async (req, res) => {
-  try {
-    const result = await pool.query("DELETE FROM appointments WHERE date >= '2026-05-13'");
-    res.json({ deleted: result.rowCount });
-  } catch(e) { res.status(500).json({ error: e.message }) }
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────
