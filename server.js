@@ -268,7 +268,9 @@ app.post('/api/appointments', auth, async (req, res) => {
     const r = await pool.query('SELECT * FROM appointments WHERE id=$1', [id]);
     // Push notif if from booking
     if(a.source === 'booking'){
-      sendPushToAll('Nouveau RDV', `${a.clientName || 'Client'} — ${a.service} le ${a.date} à ${a.time}`).catch(()=>{});
+      const paid = a.paid === true || a.status === 'paid';
+      const body = `${a.clientName || 'Client'} a pris rendez-vous le ${fmtDayPretty(a.date)} à ${fmtTimeHHhMM(a.time)} · ${paid ? 'a déjà payé' : 'n\'a pas encore payé'}`;
+      sendPushToAll('Nouveau rendez-vous', body, id).catch(()=>{});
     }
     res.json(rowToAppt(r.rows[0]));
   }catch(e){ res.status(500).json({ error: e.message }) }
@@ -277,18 +279,60 @@ app.post('/api/appointments', auth, async (req, res) => {
 app.put('/api/appointments/:id', auth, async (req, res) => {
   try{
     const a = req.body;
+    // On lit l'état AVANT update pour comparer (détection déplacement)
+    const prev = await pool.query('SELECT date, time, client_id FROM appointments WHERE id=$1', [req.params.id]);
+    const oldDate = prev.rows[0]?.date || null;
+    const oldTime = prev.rows[0]?.time || null;
+    const clientId = a.clientId || a.client_id || prev.rows[0]?.client_id || null;
+
     await pool.query(`
       UPDATE appointments SET
         client_id=$2, client_name=$3, service=$4, price=$5, duration=$6,
         date=$7, time=$8, status=$9, note=$10, updated_at=NOW()
       WHERE id=$1
-    `, [req.params.id, a.clientId||a.client_id||null, a.clientName||a.client_name||'', a.service||'', a.price||0, a.duration||30, a.date, a.time, a.status||'pending', a.note||'']);
+    `, [req.params.id, clientId, a.clientName||a.client_name||'', a.service||'', a.price||0, a.duration||30, a.date, a.time, a.status||'pending', a.note||'']);
+
+    // Push client si la date ou l'heure a changé
+    const dateChanged = oldDate && oldDate !== a.date;
+    const timeChanged = oldTime && oldTime !== a.time;
+    if(dateChanged || timeChanged){
+      const body = `FCUTZ a déplacé ton RDV du ${fmtDayPretty(oldDate)} à ${fmtTimeHHhMM(oldTime)} au ${fmtDayPretty(a.date)} à ${fmtTimeHHhMM(a.time)}`;
+      sendPushToAppt(req.params.id, clientId, 'Modification de rendez-vous', body, {
+        oldDate, oldTime, newDate: a.date, newTime: a.time,
+      }).catch(()=>{});
+    }
+    res.json({ ok: true });
+  }catch(e){ res.status(500).json({ error: e.message }) }
+});
+
+// Endpoint PATCH dédié pour drag&drop (déplacement rapide)
+app.patch('/api/appointments/:id', auth, async (req, res) => {
+  try{
+    const { date, time } = req.body;
+    if(!date || !time) return res.status(400).json({ error: 'date and time required' });
+    const prev = await pool.query('SELECT date, time, client_id FROM appointments WHERE id=$1', [req.params.id]);
+    const oldDate = prev.rows[0]?.date || null;
+    const oldTime = prev.rows[0]?.time || null;
+    const clientId = prev.rows[0]?.client_id || null;
+    await pool.query('UPDATE appointments SET date=$2, time=$3, updated_at=NOW() WHERE id=$1', [req.params.id, date, time]);
+    if(oldDate && oldTime && (oldDate !== date || oldTime !== time)){
+      const body = `FCUTZ a déplacé ton RDV du ${fmtDayPretty(oldDate)} à ${fmtTimeHHhMM(oldTime)} au ${fmtDayPretty(date)} à ${fmtTimeHHhMM(time)}`;
+      sendPushToAppt(req.params.id, clientId, 'Modification de rendez-vous', body, {
+        oldDate, oldTime, newDate: date, newTime: time,
+      }).catch(()=>{});
+    }
     res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
 });
 
 app.delete('/api/appointments/:id', auth, async (req, res) => {
   try{
+    const r = await pool.query('SELECT date, time, service, client_id FROM appointments WHERE id=$1', [req.params.id]);
+    if(r.rows.length){
+      const { date, time, service, client_id } = r.rows[0];
+      const body = `Ton RDV ${service || 'Coupe'} du ${fmtDayPretty(date)} à ${fmtTimeHHhMM(time)} a été annulé.`;
+      sendPushToAppt(req.params.id, client_id, 'RDV annulé', body, {}).catch(()=>{});
+    }
     await pool.query('DELETE FROM appointments WHERE id=$1', [req.params.id]);
     res.json({ ok: true });
   }catch(e){ res.status(500).json({ error: e.message }) }
@@ -420,7 +464,10 @@ app.post('/api/appointments/create', async (req, res) => {
       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     `, [id, clientId, `${b.fname||''} ${b.lname||''}`.trim(), b.service, b.price||0, dur, b.date, b.time, b.status||'confirmed', b.note||'', b.source||'booking']);
 
-    sendPushToAll('Nouveau RDV en ligne', `${b.fname||''} ${b.lname||''} — ${b.service} le ${b.date} à ${b.time}`, id).catch(()=>{});
+    const fullName = `${b.fname||''} ${b.lname||''}`.trim() || 'Client';
+    const bPaid = b.paid === true || b.status === 'paid';
+    const pushBody = `${fullName} a pris rendez-vous le ${fmtDayPretty(b.date)} à ${fmtTimeHHhMM(b.time)} · ${bPaid ? 'a déjà payé' : 'n\'a pas encore payé'}`;
+    sendPushToAll('Nouveau rendez-vous', pushBody, id).catch(()=>{});
     res.json({ ok: true, id });
   }catch(e){ res.status(500).json({ error: e.message }) }
 });
@@ -645,6 +692,46 @@ async function sendPushToAll(title, body, apptId){
   }catch(e){ console.warn('push error', e.message); }
 }
 
+// Envoie un push au client d'un RDV — cherche d'abord par booking_id, puis par client_id (fallback)
+async function sendPushToAppt(apptId, clientId, title, body, extra){
+  try{
+    let r = await pool.query(
+      'SELECT endpoint, p256dh, auth FROM client_push_subs WHERE booking_id=$1',
+      [apptId]
+    );
+    if(!r.rows.length && clientId){
+      r = await pool.query(`
+        SELECT cps.endpoint, cps.p256dh, cps.auth
+        FROM client_push_subs cps
+        JOIN appointments a ON a.id = cps.booking_id
+        WHERE a.client_id = $1
+        ORDER BY cps.created_at DESC
+        LIMIT 1
+      `, [clientId]);
+    }
+    if(!r.rows.length) return;
+    const payload = JSON.stringify({
+      title, body,
+      type: 'client-move',
+      apptId,
+      ...(extra || {}),
+      icon: '/img/COUPE PREMIUM.png',
+      badge: '/img/COUPE PREMIUM.png',
+    });
+    for(const sub of r.rows){
+      try{
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys:{ p256dh: sub.p256dh, auth: sub.auth } }, payload);
+      }catch(err){
+        if(err.statusCode === 404 || err.statusCode === 410){
+          await pool.query('DELETE FROM client_push_subs WHERE endpoint=$1', [sub.endpoint]);
+        }
+      }
+    }
+  }catch(e){ console.warn('push-client error', e.message); }
+}
+// Alias pour compatibilité
+const sendPushToBookingClient = (bookingId, title, body, extra) => sendPushToAppt(bookingId, null, title, body, extra);
+
 // ─── CLIENT PUSH REMINDERS ───────────────────────────────────
 app.post('/api/client-notify/subscribe', async (req, res) => {
   try{
@@ -675,13 +762,13 @@ setInterval(async () => {
       const sub = { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } };
       if(!row.sent_24h && row.notify_24h && new Date(row.notify_24h) <= new Date(now)){
         try{
-          await webpush.sendNotification(sub, JSON.stringify({ title:'✂️ Rappel RDV — FCUTZ', body: row.message_24h || 'Ton RDV est demain !', type:'client' }));
+          await webpush.sendNotification(sub, JSON.stringify({ title:'Rappel RDV', body: row.message_24h || 'Ton RDV est demain !', type:'client' }));
         }catch(_){}
         await pool.query('UPDATE client_push_subs SET sent_24h=true WHERE id=$1', [row.id]);
       }
       if(!row.sent_2h && row.notify_2h && new Date(row.notify_2h) <= new Date(now)){
         try{
-          await webpush.sendNotification(sub, JSON.stringify({ title:"✂️ C'est bientôt — FCUTZ", body: row.message_2h || 'Ton RDV est dans 2h !', type:'client' }));
+          await webpush.sendNotification(sub, JSON.stringify({ title:"C'est bientôt", body: row.message_2h || 'Ton RDV est dans 2h !', type:'client' }));
         }catch(_){}
         await pool.query('UPDATE client_push_subs SET sent_2h=true WHERE id=$1', [row.id]);
       }
@@ -880,6 +967,33 @@ app.post('/api/availability/closed/remove', auth, async (req, res) => {
 // ─── HELPERS ─────────────────────────────────────────────────
 function toMin(t){ const [h,m] = t.split(':').map(Number); return h*60 + m; }
 function fromMin(min){ const h = Math.floor(min/60), m = min%60; return String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0'); }
+function fmtDay(ds){
+  if(!ds) return '—';
+  const d = new Date(ds + 'T12:00:00');
+  const days = ['dimanche','lundi','mardi','mercredi','jeudi','vendredi','samedi'];
+  const months = ['jan','fév','mar','avr','mai','juin','juil','aoû','sep','oct','nov','déc'];
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+}
+// Format "Mardi 6 mai" — utilisé pour les push barber (capitalisé)
+function fmtDayPretty(ds){
+  if(!ds) return '—';
+  const d = new Date(ds + 'T12:00:00');
+  const days = ['Dimanche','Lundi','Mardi','Mercredi','Jeudi','Vendredi','Samedi'];
+  const months = ['jan.','févr.','mars','avr.','mai','juin','juil.','août','sept.','oct.','nov.','déc.'];
+  return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]}`;
+}
+// Format "16h30" depuis "16:30"
+function fmtTimeHHhMM(t){
+  if(!t) return '—';
+  const [h, m] = t.split(':');
+  return `${parseInt(h,10)}h${(m||'00').padStart(2,'0')}`;
+}
+// Statut paiement humain
+function paymentLabel(a){
+  if(a.paid === true || a.status === 'paid') return 'Payé';
+  if(a.status === 'confirmed') return 'Confirmé';
+  return 'À régler sur place';
+}
 
 // ─── ERROR HANDLING ──────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Route not found', path: req.path }));
